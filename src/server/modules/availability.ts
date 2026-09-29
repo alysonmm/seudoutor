@@ -64,6 +64,7 @@ export async function computeSlots(o: Offering, fromDate: string, toDate: string
     `SELECT weekday, start_time::text, end_time::text, slot_step_minutes, valid_from::text, valid_until::text
        FROM availability_rules WHERE practitioner_id=$1 AND location_id=$2 AND organization_id=$3 AND active`,
     [o.practitioner_id, o.location_id, o.organization_id], db);
+  if (rules.length === 0 && !(await query('SELECT 1 FROM availability_exceptions WHERE practitioner_id=$1 AND location_id=$2 AND kind=$3 LIMIT 1', [o.practitioner_id, o.location_id, 'open'], db)).length) return [];
   const excs = await query<Exc>(
     `SELECT on_date::text, kind, start_time::text, end_time::text FROM availability_exceptions
       WHERE practitioner_id=$1 AND location_id=$2 AND organization_id=$3 AND on_date BETWEEN $4 AND $5`,
@@ -106,10 +107,16 @@ export async function isOffered(o: Offering, start: Date, opts: SlotOptions = {}
   return slots.some((s) => s.startsAt === start.toISOString());
 }
 
+/** Próximo horário: busca em janelas crescentes (3, 7, 14 dias) para não calcular 14 dias quando há vaga próxima. */
 export async function nextSlot(o: Offering, opts: { days?: number } = {}, db: Db = pool()): Promise<Slot | null> {
   const from = DateTime.now().setZone(o.timezone).toISODate()!;
-  const to = DateTime.now().setZone(o.timezone).plus({ days: opts.days ?? 14 }).toISODate()!;
-  return (await computeSlots(o, from, to, {}, db))[0] ?? null;
+  const max = opts.days ?? 14;
+  for (const d of [3, 7, max].filter((x, i, a) => x <= max && a.indexOf(x) === i)) {
+    const to = DateTime.now().setZone(o.timezone).plus({ days: d }).toISODate()!;
+    const s = (await computeSlots(o, from, to, {}, db))[0];
+    if (s) return s;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

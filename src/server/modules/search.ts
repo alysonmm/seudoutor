@@ -125,8 +125,13 @@ export async function searchPractitioners(raw: z.input<typeof searchSchema>) {
         const day = await computeSlots(o, f.date, f.date);
         s = day.find((x) => (!f.timeFrom || x.localTime >= f.timeFrom) && (!f.timeTo || x.localTime <= f.timeTo)) ?? null;
       } else {
-        const cands = await computeSlots(o, DateTime.now().setZone(o.timezone).toISODate()!, DateTime.now().setZone(o.timezone).plus({ days: 14 }).toISODate()!);
-        s = cands.find((x) => (!f.timeFrom || x.localTime >= f.timeFrom) && (!f.timeTo || x.localTime <= f.timeTo)) ?? null;
+        // janelas crescentes; respeita filtros de horário, senão para no primeiro horário livre
+        s = null;
+        for (const d of [3, 7, 14]) {
+          const cands = await computeSlots(o, DateTime.now().setZone(o.timezone).toISODate()!, DateTime.now().setZone(o.timezone).plus({ days: d }).toISODate()!);
+          s = cands.find((x) => (!f.timeFrom || x.localTime >= f.timeFrom) && (!f.timeTo || x.localTime <= f.timeTo)) ?? null;
+          if (s) break;
+        }
       }
       if (s && (!best || s.startsAt < best.startsAt)) best = s;
     }
