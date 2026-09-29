@@ -23,7 +23,7 @@ export async function isEnabled(key: string, db: Db = pool()): Promise<boolean> 
 }
 
 /** Guarda de servidor para rotas de módulos bloqueados (AC17). */
-export async function requireFeature(key: string) {
+export async function requireFeature(key: string): Promise<never> {
   if (!(await isEnabled(key))) {
     throw new AppError(403, 'feature_disabled', 'Recurso indisponível: módulo não habilitado nesta plataforma');
   }

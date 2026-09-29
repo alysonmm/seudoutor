@@ -2,18 +2,36 @@ import { query, one, pool, type Db } from '../db';
 import { forbidden, notFound } from '../lib/errors';
 import { resolveSession, assertMfaSatisfied, type SessionInfo } from './identity';
 
+interface ScopeEntry { all: boolean; pids: Set<string>; lids: Set<string> }
+
 /** Escopo efetivo de um usuário numa organização para uma permissão. Negar por padrão. */
 export class Grant {
-  constructor(
-    public organizationId: string,
-    public all: boolean,
-    public practitionerIds: Set<string>,
-    public locationIds: Set<string>,
-  ) {}
-  allowsPractitioner(id: string) { return this.all || this.practitionerIds.has(id); }
-  allowsLocation(id: string) { return this.all || this.locationIds.size === 0 || this.locationIds.has(id); }
+  constructor(public organizationId: string, public entries: ScopeEntry[]) {}
+  get all() { return this.entries.some((e) => e.all); }
+  /** Permite o par (médico, local)? Local opcional. */
+  allows(practitionerId: string, locationId?: string | null) {
+    return this.entries.some((e) => e.all ||
+      (((e.pids.size === 0 && e.lids.size > 0) || e.pids.has(practitionerId)) &&
+       (e.lids.size === 0 || !locationId || e.lids.has(locationId))));
+  }
+  allowsPractitioner(id: string) { return this.allows(id, null); }
+  allowsLocation(id: string) { return this.entries.some((e) => e.all || e.lids.size === 0 || e.lids.has(id)); }
   /** Para filtrar listas: null = sem restrição de médico. */
-  practitionerFilter(): string[] | null { return this.all ? null : [...this.practitionerIds]; }
+  practitionerFilter(): string[] | null {
+    if (this.all) return null;
+    return [...new Set(this.entries.flatMap((e) => [...e.pids]))];
+  }
+  /** Fragmento SQL restringindo linhas com colunas practitioner_id/location_id; empurra parâmetros em `params`. */
+  sql(alias: string, params: unknown[]): string {
+    if (this.all) return 'true';
+    const ors = this.entries.map((e) => {
+      const parts: string[] = [];
+      if (e.pids.size) { params.push([...e.pids]); parts.push(`${alias}.practitioner_id = ANY($${params.length}::uuid[])`); }
+      if (e.lids.size) { params.push([...e.lids]); parts.push(`${alias}.location_id = ANY($${params.length}::uuid[])`); }
+      return parts.length ? `(${parts.join(' AND ')})` : 'false';
+    });
+    return `(${ors.join(' OR ')})`;
+  }
 }
 
 /**
@@ -32,25 +50,24 @@ export async function authorizeOrg(userId: string, organizationId: string, permi
       WHERE m.user_id=$1 AND m.organization_id=$2 AND m.status='active'`,
     [userId, organizationId, permission], db);
   if (!rows.length) throw forbidden();
-  let all = false;
-  const pids = new Set<string>();
-  const lids = new Set<string>();
+  const entries: ScopeEntry[] = [];
   for (const r of rows) {
-    if (r.role_id === 'clinic_manager' || r.role_id === 'finance') { all = true; continue; }
+    if (r.role_id === 'clinic_manager' || r.role_id === 'finance') { entries.push({ all: true, pids: new Set(), lids: new Set() }); continue; }
+    const pids = new Set<string>(), lids = new Set<string>();
     if (r.role_id === 'practitioner') {
       const p = await one<{ id: string }>(
         `SELECT p.id FROM practitioners p JOIN practitioner_memberships pm ON pm.practitioner_id = p.id AND pm.organization_id=$2 AND pm.status='active'
           WHERE p.user_id=$1`, [userId, organizationId], db);
       if (p) pids.add(p.id);
-      continue;
+    } else {
+      const scopes = await query<{ scope_type: string; scope_id: string }>(
+        'SELECT scope_type, scope_id FROM member_scopes WHERE membership_id=$1', [r.membership_id], db);
+      for (const s of scopes) (s.scope_type === 'practitioner' ? pids : lids).add(s.scope_id);
     }
-    const scopes = await query<{ scope_type: string; scope_id: string }>(
-      'SELECT scope_type, scope_id FROM member_scopes WHERE membership_id=$1', [r.membership_id], db);
-    for (const s of scopes) (s.scope_type === 'practitioner' ? pids : lids).add(s.scope_id);
+    if (pids.size || lids.size) entries.push({ all: false, pids, lids });
   }
-  if (!all && pids.size === 0 && lids.size === 0) throw forbidden(); // secretária sem atribuição
-  // secretária só com unidades: vale para todos os médicos daquelas unidades (checado por allowsLocation).
-  return new Grant(organizationId, all, pids, lids);
+  if (!entries.length) throw forbidden(); // sem escopo atribuído = nada (negar por padrão)
+  return new Grant(organizationId, entries);
 }
 
 /** Como authorizeOrg, mas devolve false em vez de lançar. */
