@@ -18,7 +18,7 @@ export interface Field {
 function setPath(obj: any, path: string, value: unknown) {
   const parts = path.split('.');
   let o = obj;
-  parts.slice(0, -1).forEach((p) => { o[p] = o[p] ?? {}; o = o[p]; });
+  parts.slice(0, -1).forEach((p, i) => { o[p] = o[p] ?? (/^\d+$/.test(parts[i + 1]) ? [] : {}); o = o[p]; });
   o[parts.at(-1)!] = value;
 }
 

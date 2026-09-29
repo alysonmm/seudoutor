@@ -34,7 +34,7 @@ export default async function Perfil({ params, searchParams }: { params: Promise
   return (
     <>
       <h1>{p.displayName}</h1>
-      <p>{p.specialties.map((s) => s.name + (s.rqe ? ` (RQE ${s.rqe})` : '')).join(' • ')}</p>
+      <p>{p.specialties.map((s: { name: string; rqe: string | null }) => s.name + (s.rqe ? ` (RQE ${s.rqe})` : '')).join(' • ')}</p>
       {p.verification && <p className="small muted">{p.verification}. Verificação manual do registro; não representa endosso do CFM nem certificação de qualidade clínica.</p>}
       {p.bio && <p style={{ whiteSpace: 'pre-wrap' }}>{p.bio}</p>}
       {p.languages.length > 0 && <p className="small">Idiomas: {p.languages.join(', ')}</p>}

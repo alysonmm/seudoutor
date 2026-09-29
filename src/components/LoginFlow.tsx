@@ -1,7 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import JsonForm from './JsonForm';
 
 /** Login → (se exigido) verificação TOTP ou cadastro do segundo fator com códigos de recuperação. */
 export default function LoginFlow({ next, startAtMfa }: { next: string; startAtMfa: boolean }) {

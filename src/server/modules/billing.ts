@@ -18,7 +18,7 @@ export interface PspAdapter { name: string; createCheckout(input: { subscription
 
 const sandboxPsp: PspAdapter = {
   name: 'sandbox',
-  async createCheckout(i) {
+  async createCheckout() {
     const ref = 'sbx_' + randomToken(9);
     return { providerSessionRef: ref, checkoutUrl: `${config.baseUrl}/sandbox-psp/${ref}` };
   },

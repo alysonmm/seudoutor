@@ -1,5 +1,4 @@
 import { describe, it, expect, afterAll } from 'vitest';
-import { generateSync } from 'otplib';
 import { call, setPlan, newUser, sessionFor, newStaffOrg, lastMailCode, rnd, PASSWORD, totpFor } from './helpers';
 import * as registerRoute from '../src/app/api/v1/auth/register/route';
 import * as loginRoute from '../src/app/api/v1/auth/login/route';

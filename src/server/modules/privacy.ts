@@ -18,6 +18,7 @@ export async function createPrivacyRequest(userId: string, kind: (typeof PRIVACY
   const r = await one<{ id: string; due_at: string }>(
     `INSERT INTO privacy_requests(protocol, user_id, kind, details, due_at) VALUES ($1,$2,$3,$4, now() + make_interval(days => $5::int)) RETURNING id, due_at`,
     [protocol, userId, kind, details?.slice(0, 2000) ?? null, days]);
+  await query(`INSERT INTO outbox_events(event_type, payload, dedupe_key) VALUES ('PrivacyRequestCreated', $1, $2) ON CONFLICT (dedupe_key) DO NOTHING`, [JSON.stringify({ privacyRequestId: r!.id, kind }), `privreq:${r!.id}`]);
   await audit({ actorUserId: userId, action: 'privacy.request_created', objectType: 'privacy_request', objectId: r!.id, metadata: { kind } });
   return { id: r!.id, protocol, dueAt: r!.due_at };
 }

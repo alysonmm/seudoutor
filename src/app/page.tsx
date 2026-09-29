@@ -1,4 +1,3 @@
-import Link from 'next/link';
 import { listSpecialties } from '@/server/modules/catalog';
 
 export default async function Home() {

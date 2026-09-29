@@ -34,8 +34,8 @@ export async function createIncident(actor: string, raw: z.input<typeof incident
   return { id: r!.id, communicationDueAt: due };
 }
 
-const STEPS = ['identified', 'contained', 'assessing', 'communicated', 'closed'] as const;
-export async function advanceIncident(actor: string, id: string, status: (typeof STEPS)[number], note?: string) {
+export type IncidentStatus = 'identified' | 'contained' | 'assessing' | 'communicated' | 'closed';
+export async function advanceIncident(actor: string, id: string, status: IncidentStatus, note?: string) {
   await requirePlatform(actor, 'incident.manage');
   const inc = await one<any>('SELECT * FROM security_incidents WHERE id=$1', [id]);
   if (!inc) throw notFound();

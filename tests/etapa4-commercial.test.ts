@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll } from 'vitest';
-import { call, newUser, rnd, setPlan, count, sessionFor } from './helpers';
+import { call, newUser, rnd, count, sessionFor } from './helpers';
 import { makeWorld, makeAdmin, patientSession } from './world';
 import { closePool, one, query, pool } from '../src/server/db';
 import * as B from '../src/server/modules/booking';
