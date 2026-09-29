@@ -29,11 +29,11 @@ export function occupancyRange(o: Pick<Offering, 'duration_minutes' | 'prep_minu
   return { lower: s, upper: e };
 }
 
-interface Rule { weekday: number; start_time: string; end_time: string; slot_step_minutes: number; valid_from: string | null; valid_until: string | null }
-interface Exc { on_date: string; kind: 'closed' | 'open'; start_time: string | null; end_time: string | null }
+export interface Rule { weekday: number; start_time: string; end_time: string; slot_step_minutes: number; valid_from: string | null; valid_until: string | null }
+export interface Exc { on_date: string; kind: 'closed' | 'open'; start_time: string | null; end_time: string | null }
 
 /** Janelas de atendimento do dia local: exceções da data prevalecem sobre a recorrência. */
-function windowsFor(day: DateTime, rules: Rule[], excs: Exc[]): { start: string; end: string; step: number }[] {
+export function windowsFor(day: DateTime, rules: Rule[], excs: Exc[]): { start: string; end: string; step: number }[] {
   const iso = day.toISODate()!;
   const dayExcs = excs.filter((e) => e.on_date === iso);
   if (dayExcs.length) {
@@ -44,7 +44,7 @@ function windowsFor(day: DateTime, rules: Rule[], excs: Exc[]): { start: string;
     .map((r) => ({ start: r.start_time, end: r.end_time, step: r.slot_step_minutes }));
 }
 
-const at = (day: DateTime, hhmmss: string) => {
+export const at = (day: DateTime, hhmmss: string) => {
   const [h, m] = hhmmss.split(':').map(Number);
   return day.set({ hour: h, minute: m, second: 0, millisecond: 0 });
 };

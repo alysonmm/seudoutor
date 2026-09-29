@@ -160,7 +160,7 @@ export async function publicProfile(slug: string) {
     `SELECT ps.id AS offering_id, ps.duration_minutes, ps.price_cents, ps.accepts_private, ps.payment_methods, ps.conditions, ps.return_policy,
             s.name AS service_name, l.id AS location_id, l.name AS location_name, l.street, l.number, l.neighborhood, l.city, l.uf, l.accessibility,
             l.arrival_instructions, l.latitude, l.longitude,
-            COALESCE((SELECT json_agg(json_build_object('product', ip.name, 'insurer', i.name, 'requiresAuthorization', a.requires_authorization, 'updatedAt', a.updated_at))
+            COALESCE((SELECT json_agg(json_build_object('productId', ip.id, 'product', ip.name, 'insurer', i.name, 'requiresAuthorization', a.requires_authorization, 'updatedAt', a.updated_at))
                         FROM accepted_insurance_products a JOIN insurance_products ip ON ip.id = a.insurance_product_id JOIN insurers i ON i.id = ip.insurer_id
                        WHERE a.practitioner_service_id = ps.id), '[]') AS insurance
        FROM practitioner_services ps
