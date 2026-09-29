@@ -33,9 +33,9 @@ async function purgeExpiredHolds(tx: Db, practitionerId: string) {
   await tx.query(`UPDATE slot_holds SET status='expired' WHERE practitioner_id=$1 AND status='active' AND expires_at <= now()`, [practitionerId]);
 }
 
-async function alternatives(o: Offering, around: Date): Promise<Slot[]> {
+async function alternatives(o: Offering, around: Date, db: Db = pool()): Promise<Slot[]> {
   const d = DateTime.fromJSDate(around, { zone: o.timezone });
-  const slots = await computeSlots(o, d.toISODate()!, d.plus({ days: 7 }).toISODate()!);
+  const slots = await computeSlots(o, d.toISODate()!, d.plus({ days: 7 }).toISODate()!, {}, db);
   return slots.slice(0, 5);
 }
 
@@ -48,10 +48,23 @@ async function insertOccupancy(tx: Db, o: Offering, start: Date, kind: 'hold' | 
   return row!.id;
 }
 
-/** Executa `fn`; conflito de exclusão vira 409 com alternativas (nunca revela quem ocupa). */
+/**
+ * Conflito de exclusão (23P01) aborta a transação; as alternativas são calculadas DEPOIS do rollback, fora dela
+ * (`withAlternatives`), para não pedir uma segunda conexão ao pool enquanto esta transação segura uma (deadlock sob carga).
+ */
 async function guardConflict<T>(o: Offering, start: Date, fn: () => Promise<T>): Promise<T> {
   try { return await fn(); } catch (e: any) {
-    if (e?.code === '23P01') throw conflict('slot_conflict', 'Este horário acabou de ser ocupado. Escolha outro.', { alternatives: await alternatives(o, start) });
+    if (e?.code === '23P01') throw conflict('slot_conflict', 'Este horário acabou de ser ocupado. Escolha outro.', { _alt: { offeringId: o.id, start: start.toISOString() } });
+    throw e;
+  }
+}
+async function withAlternatives<T>(fn: () => Promise<T>): Promise<T> {
+  try { return await fn(); } catch (e: any) {
+    const alt = e instanceof AppError && e.code === 'slot_conflict' && (e.details as any)?._alt;
+    if (alt) {
+      const o = await loadOffering(alt.offeringId);
+      throw conflict('slot_conflict', e.message, { alternatives: o ? await alternatives(o, new Date(alt.start)) : [] });
+    }
     throw e;
   }
 }
@@ -64,12 +77,12 @@ export const holdSchema = z.object({ offeringId: z.string().uuid(), startsAt: z.
 export async function createHold(userId: string, raw: z.input<typeof holdSchema>, idemKey?: string) {
   const b = holdSchema.parse(raw);
   await rateLimit(`hold:${userId}`, await setting<number>('hold_rate_limit_per_10min', 20), 600);
-  return idempotent(userId, 'hold', idemKey, b, async (tx) => {
+  return withAlternatives(() => idempotent(userId, 'hold', idemKey, b, async (tx) => {
     const o = await loadOffering(b.offeringId, tx);
     if (!o) throw notFound('offering_not_found');
     const start = new Date(b.startsAt);
     await assertBookable(tx, o.id);
-    if (!(await isOffered(o, start, { ignoreOccupancy: true }, tx))) throw conflict('slot_not_offered', 'Horário não oferecido', { alternatives: await alternatives(o, start) });
+    if (!(await isOffered(o, start, { ignoreOccupancy: true }, tx))) throw conflict('slot_not_offered', 'Horário não oferecido', { alternatives: await alternatives(o, start, tx) });
     await purgeExpiredHolds(tx, o.practitioner_id);
     const ttl = await setting<number>('hold_ttl_seconds', 300, tx);
     const expires = new Date(Date.now() + ttl * 1000);
@@ -80,7 +93,7 @@ export async function createHold(userId: string, raw: z.input<typeof holdSchema>
       [o.organization_id, o.practitioner_id, o.location_id, o.id, userId, start, end, expires], tx);
     await guardConflict(o, start, () => insertOccupancy(tx, o, start, 'hold', hold!.id, expires)); // 409 + alternativas; a transação inteira é revertida
     return { status: 201, body: { holdId: hold!.id, expiresAt: expires.toISOString(), startsAt: start.toISOString() } };
-  });
+  }));
 }
 
 export async function releaseHold(userId: string, holdId: string) {
@@ -144,7 +157,7 @@ async function buildSnapshot(tx: Db, o: Offering, payer: { type: 'private' | 'in
 }
 
 async function ensureOrgPatientForAccount(tx: Db, userId: string, orgId: string): Promise<string> {
-  const acc = await requirePatientAccount(userId);
+  const acc = await requirePatientAccount(userId, tx);
   const ex = await one<{ id: string }>(
     `SELECT op.id FROM organization_patients op JOIN patient_account_links l ON l.organization_patient_id = op.id
       WHERE op.organization_id=$1 AND l.patient_account_id=$2`, [orgId, acc.id], tx);
@@ -195,13 +208,13 @@ async function emit(tx: Db, type: string, payload: Record<string, unknown>, dedu
 /** Confirmação pelo paciente. Revalida horário/local/preço na transação; sem `holdId` ocupa direto (AC01). */
 export async function bookAppointment(userId: string, raw: z.input<typeof bookSchema>, idemKey?: string): Promise<IdemResult<any>> {
   const b = bookSchema.parse(raw);
-  return idempotent(userId, 'book', idemKey, b, async (tx) => {
+  return withAlternatives(() => idempotent(userId, 'book', idemKey, b, async (tx) => {
     let o: Offering | undefined; let start: Date; let holdOcc: string | undefined; let holdId: string | undefined;
     if (b.holdId) {
       const h = await one<any>(`SELECT * FROM slot_holds WHERE id=$1 FOR UPDATE`, [b.holdId], tx);
       if (!h || h.user_id !== userId) throw notFound('hold_not_found');
       if (h.status !== 'active' || new Date(h.expires_at) <= new Date()) {
-        throw conflict('hold_expired', 'A reserva do horário expirou. Escolha um horário novamente.', { alternatives: await alternatives((await loadOffering(h.practitioner_service_id, tx))!, new Date(h.starts_at)) });
+        throw conflict('hold_expired', 'A reserva do horário expirou. Escolha um horário novamente.', { alternatives: await alternatives((await loadOffering(h.practitioner_service_id, tx))!, new Date(h.starts_at), tx) });
       }
       o = await loadOffering(h.practitioner_service_id, tx);
       start = new Date(h.starts_at);
@@ -213,7 +226,7 @@ export async function bookAppointment(userId: string, raw: z.input<typeof bookSc
     }
     if (!o) throw notFound('offering_not_found');
     await assertBookable(tx, o.id);
-    if (!(await isOffered(o, start, { ignoreOccupancy: true }, tx))) throw conflict('slot_not_offered', 'Horário não oferecido', { alternatives: await alternatives(o, start) });
+    if (!(await isOffered(o, start, { ignoreOccupancy: true }, tx))) throw conflict('slot_not_offered', 'Horário não oferecido', { alternatives: await alternatives(o, start, tx) });
     if (!holdId) await purgeExpiredHolds(tx, o.practitioner_id);
     const orgPatientId = await ensureOrgPatientForAccount(tx, userId, o.organization_id);
     const appt = await createAppointmentRow(tx, {
@@ -225,7 +238,7 @@ export async function bookAppointment(userId: string, raw: z.input<typeof bookSc
     await emit(tx, 'AppointmentScheduled', { appointmentId: appt.id, version: 1 }, `sched:${appt.id}:1`);
     await audit({ actorUserId: userId, organizationId: o.organization_id, action: 'appointment.created', objectType: 'appointment', objectId: appt.id, metadata: { source: 'app' } }, tx);
     return { status: 201, body: appt };
-  });
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -242,13 +255,13 @@ export const manualSchema = z.object({
 export async function createManualAppointment(actor: string, org: string, raw: z.input<typeof manualSchema>) {
   const b = manualSchema.parse(raw);
   const g = await authorizeOrg(actor, org, 'appointment.create');
-  return withTx(async (tx) => {
+  return withAlternatives(() => withTx(async (tx) => {
     const o = await loadOffering(b.offeringId, tx);
     if (!o || o.organization_id !== org) throw notFound('offering_not_found');
     if (!g.allows(o.practitioner_id, o.location_id)) throw forbidden();
     await assertBookable(tx, o.id);
     const start = new Date(b.startsAt);
-    if (!(await isOffered(o, start, { ignoreOccupancy: true }, tx))) throw conflict('slot_not_offered', 'Horário não oferecido', { alternatives: await alternatives(o, start) });
+    if (!(await isOffered(o, start, { ignoreOccupancy: true }, tx))) throw conflict('slot_not_offered', 'Horário não oferecido', { alternatives: await alternatives(o, start, tx) });
     await purgeExpiredHolds(tx, o.practitioner_id);
     let opId = b.patient.organizationPatientId;
     if (opId) {
@@ -262,7 +275,7 @@ export async function createManualAppointment(actor: string, org: string, raw: z
     const appt = await createAppointmentRow(tx, { o, start, orgPatientId: opId, requestedBy: null, source: b.source, actor, payer: { type: b.payerType, productId: b.insuranceProductId } });
     await audit({ actorUserId: actor, organizationId: org, action: 'appointment.created', objectType: 'appointment', objectId: appt.id, metadata: { source: b.source } }, tx);
     return { ...appt, organizationPatientId: opId };
-  });
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -330,7 +343,7 @@ export async function cancelAppointment(userId: string | null, id: string, reaso
 // ---------------------------------------------------------------------------
 export async function rescheduleAppointment(userId: string, id: string, raw: { startsAt: string; offeringId?: string }, idemKey?: string) {
   const b = z.object({ startsAt: z.string().datetime(), offeringId: z.string().uuid().optional() }).parse(raw);
-  return idempotent(userId, `reschedule:${id}`, idemKey, b, async (tx) => {
+  return withAlternatives(() => idempotent(userId, `reschedule:${id}`, idemKey, b, async (tx) => {
     const old = await loadForUpdate(tx, id);
     const actor = await resolveActor(tx, userId, old, 'appointment.update');
     if (!ACTIVE.includes(old.status)) throw conflict('not_reschedulable', 'Este agendamento não pode ser reagendado');
@@ -339,7 +352,7 @@ export async function rescheduleAppointment(userId: string, id: string, raw: { s
     if (!o || o.organization_id !== old.organization_id || o.practitioner_id !== old.practitioner_id) throw badRequest('invalid_offering');
     const start = new Date(b.startsAt);
     await assertBookable(tx, o.id);
-    if (!(await isOffered(o, start, { ignoreOccupancy: true }, tx))) throw conflict('slot_not_offered', 'Horário não oferecido', { alternatives: await alternatives(o, start) });
+    if (!(await isOffered(o, start, { ignoreOccupancy: true }, tx))) throw conflict('slot_not_offered', 'Horário não oferecido', { alternatives: await alternatives(o, start, tx) });
     await purgeExpiredHolds(tx, o.practitioner_id);
     const oldOcc = old.occupancy_id;
     const version = old.version + 1;
@@ -355,7 +368,7 @@ export async function rescheduleAppointment(userId: string, id: string, raw: { s
     await emit(tx, 'AppointmentRescheduled', { appointmentId: appt.id, previousAppointmentId: id }, `resched:${id}->${appt.id}`);
     await audit({ actorUserId: userId, organizationId: old.organization_id, action: 'appointment.rescheduled', objectType: 'appointment', objectId: appt.id, metadata: { from: id } }, tx);
     return { status: 200, body: appt };
-  });
+  }));
 }
 
 // ---------------------------------------------------------------------------

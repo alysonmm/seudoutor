@@ -106,8 +106,8 @@ export async function requireAuth(req: Request, opts: { allowMfaPending?: boolea
   return s;
 }
 
-export async function requirePatientAccount(userId: string) {
-  const p = await one<{ id: string }>('SELECT id FROM patient_accounts WHERE user_id=$1', [userId]);
+export async function requirePatientAccount(userId: string, db: Db = pool()) {
+  const p = await one<{ id: string }>('SELECT id FROM patient_accounts WHERE user_id=$1', [userId], db);
   if (!p) throw notFound('patient_account_missing');
   return p;
 }
